@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import time
+
 
 class ConditionModule(nn.Module):
     def __init__(self, layerNum):
@@ -67,12 +69,14 @@ class DPMMBlock(nn.Module):
         self.recon = nn.Conv2d(nf, 1, 3, 1, 1, bias=True)
 
     def forward(self, r, sigma):
-        m = torch.Tensor.repeat(r.shape[0], 1, r.shape[2], r.shape[3])
+        m = sigma.repeat(r.shape[0], 1, r.shape[2], r.shape[3])
         in0 = torch.cat((r, m), 1)
+        # print('M, in0\n', m.device, in0.device)
         out = self.extr(in0)
         out, _ = self.rb1([out, None])
         out, _ = self.rb2([out, None])
         out = self.recon(out)
+        # print('r, out:', r.shape, out.shape)
         return r + out
 
 
@@ -83,25 +87,30 @@ class ISTA_Netpp(nn.Module):
         self.n_output = n_output
 
         self.cm = ConditionModule(layerNum)
-        self.blocks = []
+        blocks = []
         for i in range(layerNum):
-            self.blocks.append([DGDMBlock(), DPMMBlock()])
+            blocks.append(nn.ModuleList([DGDMBlock(), DPMMBlock()]))
+        self.blocks = nn.ModuleList(blocks)
 
     def forward(self, batch_y, gamma, Phi, n_input):
+        # print('batch_y, gamma, Phi\n', batch_y.device, gamma.device, Phi.device)
         rho_k, sigma_k = self.cm(gamma)
 
         PhiWeight = Phi.contiguous().view(n_input, 1, 128, 128)
-        PhiTWeight = Phi.transpose().contiguous().view(self.n_ouput, n_input, 1, 1)
+        PhiTWeight = Phi.t().contiguous().view(self.n_output, n_input, 1, 1)
         # y = F.conv2d(batch_x, PhiWeight, stride=33, padding=0, bias=None)
-        # y = F.conv2d(y, PhiTWeight, padding=0, bias=None)
-        # y = nn.PixelShuffle(33)(y)
-        # x = y
-        x = batch_y
-        y = batch_y
+        y = F.conv2d(batch_y, PhiTWeight, padding=0, bias=None)
+        y = nn.PixelShuffle(128)(y)
+        x = y
 
         for i in range(self.layerNum):
+            st = time.time()
             r = self.blocks[i][0](x, y, rho_k[i], PhiWeight, PhiTWeight)
+            mid = time.time()
+            # print(r.type, sigma_k.type)
             x = self.blocks[i][1](r, sigma_k[i])
+            ed = time.time()
+            print('time: ', ed - mid, mid - st)
 
         return x
 
